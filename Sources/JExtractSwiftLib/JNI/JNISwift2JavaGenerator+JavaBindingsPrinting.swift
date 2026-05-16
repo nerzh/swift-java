@@ -641,12 +641,13 @@ extension JNISwift2JavaGenerator {
     _ functionType: TranslatedFunctionType,
   ) {
     let apiParams = functionType.parameters.map({ $0.parameter.renderParameter() })
+    let throwsClause = functionType.swiftType.isThrowing ? " throws Exception" : ""
 
     printer.print(
       """
       @FunctionalInterface
       public interface \(functionType.name) {
-        \(functionType.result.javaType) apply(\(apiParams.joined(separator: ", ")));
+        \(functionType.result.javaType) apply(\(apiParams.joined(separator: ", ")))\(throwsClause);
       }
       """
     )

@@ -17,7 +17,7 @@ import struct SwiftJavaJNICore.JavaExceptionType
 extension JNIEnvironment {
   /// Execute a JNI call and check for an exception at the end. Translate
   /// any Java exception into an error.
-  func translatingJNIExceptions<Result>(body: () throws -> Result) throws -> Result {
+  public func translatingJNIExceptions<Result>(body: () throws -> Result) throws -> Result {
     let result = try body()
 
     // Check whether a Java exception occurred.

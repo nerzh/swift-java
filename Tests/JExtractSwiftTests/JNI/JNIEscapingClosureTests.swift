@@ -265,6 +265,74 @@ struct JNIEscapingClosureTests {
   }
 
   @Test
+  func escapingThrowingClosureWithOptionalCustomStructResult_javaBindings() throws {
+    let source =
+      """
+      public struct Fee {
+        public var value: Int64
+
+        public init(value: Int64) {
+          self.value = value
+        }
+      }
+
+      public func setCallback(callback: @escaping (Fee) throws -> Fee?) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .java,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        public interface callback {
+          java.util.Optional<Fee> apply(Fee _0) throws Exception;
+        }
+        """,
+      ]
+    )
+  }
+
+  @Test
+  func escapingThrowingClosureWithOptionalCustomStructResult_swiftThunks() throws {
+    let source =
+      """
+      public struct Fee {
+        public var value: Int64
+
+        public init(value: Int64) {
+          self.value = value
+        }
+      }
+
+      public func setCallback(callback: @escaping (Fee) throws -> Fee?) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        public func Java_com_example_swift_SwiftModule__00024setCallback__Lcom_example_swift_SwiftModule_00024setCallback_00024callback_2(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass, callback: jobject?) {
+        """,
+        """
+        return { _0 in
+          let environment = try JavaVirtualMachine.shared().environment()
+        """,
+        """
+        let closureResultOptional$ = try environment.translatingJNIExceptions { environment.interface.CallObjectMethodA(environment, closureObject$, methodID$, arguments$) }
+        """,
+        """
+        return closureResultValue$
+        """,
+      ]
+    )
+  }
+
+  @Test
   func nonEscapingClosure_stillWorks() throws {
     let source =
       """

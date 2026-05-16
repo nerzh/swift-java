@@ -276,7 +276,8 @@ extension JNISwift2JavaGenerator {
             conversion: .escapingClosureLowering(
               parameters: parameters,
               result: result,
-              closureName: parameterName
+              closureName: parameterName,
+              isThrowing: fn.isThrowing
             ),
             indirectConversion: nil,
             conversionCheck: nil
@@ -305,7 +306,8 @@ extension JNISwift2JavaGenerator {
           ],
           conversion: .closureLowering(
             parameters: parameters,
-            result: result
+            result: result,
+            isThrowing: fn.isThrowing
           ),
           indirectConversion: nil,
           conversionCheck: nil
@@ -1287,14 +1289,15 @@ extension JNISwift2JavaGenerator {
     /// of the `Unsafe(Mutable)Pointer` types in Swift.
     indirect case pointee(NativeSwiftConversionStep)
 
-    indirect case closureLowering(parameters: [NativeParameter], result: NativeResult)
+    indirect case closureLowering(parameters: [NativeParameter], result: NativeResult, isThrowing: Bool)
 
     /// Escaping closure lowering keeps the Java lambda alive as a global ref and
     /// resolves the JNI environment at the eventual Swift closure call site.
     indirect case escapingClosureLowering(
       parameters: [NativeParameter],
       result: NativeResult,
-      closureName: String
+      closureName: String,
+      isThrowing: Bool
     )
 
     indirect case initializeSwiftJavaWrapper(NativeSwiftConversionStep, wrapperName: String)
@@ -1661,7 +1664,7 @@ extension JNISwift2JavaGenerator {
         let inner = inner.render(&printer, placeholder)
         return "\(inner).pointee"
 
-      case .closureLowering(let parameters, let nativeResult):
+      case .closureLowering(let parameters, let nativeResult, let isThrowing):
         var printer = CodePrinter()
 
         let methodSignature = MethodSignature(
@@ -1695,8 +1698,12 @@ extension JNISwift2JavaGenerator {
           """
         )
 
-        let upcall =
+        let rawUpcall =
           "environment.interface.\(nativeResult.javaType.jniCallMethodAName)(environment, \(placeholder), methodID$, arguments$)"
+        let upcall =
+          isThrowing
+          ? "try environment.translatingJNIExceptions { \(rawUpcall) }"
+          : rawUpcall
         let result = nativeResult.conversion.render(&printer, upcall)
 
         if nativeResult.javaType.isVoid {
@@ -1710,7 +1717,7 @@ extension JNISwift2JavaGenerator {
 
         return printer.finalize()
 
-      case .escapingClosureLowering(let parameters, let nativeResult, let closureName):
+      case .escapingClosureLowering(let parameters, let nativeResult, let closureName, let isThrowing):
         var printer = CodePrinter()
 
         let methodSignature = MethodSignature(
@@ -1739,6 +1746,17 @@ extension JNISwift2JavaGenerator {
           $0.conversion.render(&argumentPrinter, $0.parameters.first!.name)
         }
 
+        let environmentLine =
+          if isThrowing {
+            "let environment = try JavaVirtualMachine.shared().environment()"
+          } else {
+            """
+            guard let environment = try? JavaVirtualMachine.shared().environment() else {
+              fatalError(\"Failed to get JNI environment for escaping closure call\")
+            }
+            """
+          }
+
         printer.print(
           """
           {
@@ -1749,9 +1767,7 @@ extension JNISwift2JavaGenerator {
             let closureContext_\(closureName)$ = JavaObjectHolder(object: \(placeholder), environment: environment)
             
             return \(closureHeader)
-              guard let environment = try? JavaVirtualMachine.shared().environment() else {
-                fatalError(\"Failed to get JNI environment for escaping closure call\")
-              }
+              \(environmentLine)
 
               \(argumentPrinter.finalize())
               let closureObject$ = closureContext_\(closureName)$.object!
@@ -1762,8 +1778,12 @@ extension JNISwift2JavaGenerator {
           """
         )
 
-        let upcall =
+        let rawUpcall =
           "environment.interface.\(nativeResult.javaType.jniCallMethodAName)(environment, closureObject$, methodID$, arguments$)"
+        let upcall =
+          isThrowing
+          ? "try environment.translatingJNIExceptions { \(rawUpcall) }"
+          : rawUpcall
         let result = nativeResult.conversion.render(&printer, upcall)
         printer.print(
           """
