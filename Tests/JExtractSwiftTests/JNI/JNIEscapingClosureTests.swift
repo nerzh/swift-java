@@ -123,6 +123,148 @@ struct JNIEscapingClosureTests {
   }
 
   @Test
+  func escapingClosureWithStringResult_swiftThunks() throws {
+    let source =
+      """
+      public func setCallback(callback: @escaping (String) -> String) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        let closureContext_callback$ = JavaObjectHolder(object: callback, environment: environment)
+        """,
+        """
+        let methodID$ = environment.interface.GetMethodID(environment, class$, "apply", "(Ljava/lang/String;)Ljava/lang/String;")!
+        """,
+        """
+        return String(fromJNI: environment.interface.CallObjectMethodA(environment, closureObject$, methodID$, arguments$), in: environment)
+        """,
+      ]
+    )
+  }
+
+  @Test
+  func escapingClosureWithCustomStruct_swiftThunks() throws {
+    let source =
+      """
+      public struct Fee {
+        public var value: Int64
+
+        public init(value: Int64) {
+          self.value = value
+        }
+      }
+
+      public func setCallback(callback: @escaping (Fee) -> Fee) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        let _0Pointer$ = UnsafeMutablePointer<Fee>.allocate(capacity: 1)
+        """,
+        """
+        let _0ClassHolder$ = _swiftJavaLoadJExtractClass("com/example/swift/Fee", environment: environment)
+        """,
+        """
+        let arguments$: [jvalue] = [jvalue(l: _0Object$)]
+        """,
+        """
+        let closureResultMemoryAddress$ = environment.interface.CallLongMethodA(environment, closureResultObject$, _JNIMethodIDCache.JNISwiftInstance.memoryAddress, [])
+        """,
+        """
+        return closureResultMemoryAddress$$.pointee
+        """,
+      ]
+    )
+  }
+
+  @Test
+  func escapingClosureWithOptionalCustomStructResult_swiftThunks() throws {
+    let source =
+      """
+      public struct Fee {
+        public var value: Int64
+
+        public init(value: Int64) {
+          self.value = value
+        }
+      }
+
+      public func setCallback(callback: @escaping () -> Fee?) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        let methodID$ = environment.interface.GetMethodID(environment, class$, "apply", "()Ljava/util/Optional;")!
+        """,
+        """
+        let closureResultOptional$ = environment.interface.CallObjectMethodA(environment, closureObject$, methodID$, arguments$)
+        """,
+        """
+        let closureResultValue$: Fee?
+        """,
+        """
+        let closureResultOptionalIsPresentValue$ = Bool(fromJNI: environment.interface.CallBooleanMethodA(environment, closureResultOptional$, closureResultOptionalIsPresent$, []), in: environment)
+        """,
+        """
+        let closureResultObject$ = environment.interface.CallObjectMethodA(environment, closureResultOptional$, closureResultOptionalGet$, [])
+        """,
+        """
+        closureResultValue$ = closureResultPointer$.pointee
+        """,
+        """
+        return closureResultValue$
+        """,
+      ]
+    )
+  }
+
+  @Test
+  func escapingClosureWithOptionalCustomStructResult_javaBindings() throws {
+    let source =
+      """
+      public struct Fee {
+        public var value: Int64
+
+        public init(value: Int64) {
+          self.value = value
+        }
+      }
+
+      public func setCallback(callback: @escaping () -> Fee?) {}
+      """
+
+    try assertOutput(
+      input: source,
+      .jni,
+      .java,
+      detectChunkByInitialLines: 1,
+      expectedChunks: [
+        """
+        public interface callback {
+          java.util.Optional<Fee> apply();
+        }
+        """,
+      ]
+    )
+  }
+
+  @Test
   func nonEscapingClosure_stillWorks() throws {
     let source =
       """

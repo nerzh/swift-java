@@ -156,6 +156,7 @@ extension JNISwift2JavaGenerator {
         config: self.config,
         javaPackage: self.javaPackage,
         javaClassLookupTable: self.javaClassLookupTable,
+        moduleJavaPackages: self.moduleJavaPackages,
         knownTypes: self.knownTypes,
         protocolWrappers: self.protocolWrappers,
         logger: self.logger,

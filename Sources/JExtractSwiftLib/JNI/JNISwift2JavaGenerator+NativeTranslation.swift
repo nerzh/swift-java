@@ -22,6 +22,7 @@ extension JNISwift2JavaGenerator {
     let config: Configuration
     let javaPackage: String
     let javaClassLookupTable: JavaClassLookupTable
+    let moduleJavaPackages: ModuleJavaPackages
     var knownTypes: SwiftKnownTypes
     let protocolWrappers: [ImportedNominalType: JavaInterfaceSwiftWrapper]
     let logger: Logger
@@ -252,16 +253,18 @@ extension JNISwift2JavaGenerator {
 
       case .function(let fn):
 
-        // @Sendable is not supported yet as "environment" is later captured inside the closure.
         if fn.isEscaping {
-          // Use the protocol infrastructure for escaping closures.
-          // This provides full support for optionals, arrays, custom types, async, etc.
-          let wrapJavaInterfaceName = "Java\(parentName).\(methodName).\(parameterName)"
-          let generator = JavaInterfaceProtocolWrapperGenerator()
-          let syntheticFunction = try generator.generateSyntheticClosureFunction(
-            functionType: fn,
-            wrapJavaInterfaceName: wrapJavaInterfaceName
-          )
+          var parameters = [NativeParameter]()
+          for (i, parameter) in fn.parameters.enumerated() {
+            let closureParamName = parameter.parameterName ?? "_\(i)"
+            let closureParameter = try translateClosureParameter(
+              parameter.type,
+              parameterName: closureParamName
+            )
+            parameters.append(closureParameter)
+          }
+
+          let result = try translateClosureResult(fn.resultType)
 
           return NativeParameter(
             parameters: [
@@ -271,7 +274,8 @@ extension JNISwift2JavaGenerator {
               )
             ],
             conversion: .escapingClosureLowering(
-              syntheticFunction: syntheticFunction,
+              parameters: parameters,
+              result: result,
               closureName: parameterName
             ),
             indirectConversion: nil,
@@ -657,6 +661,18 @@ extension JNISwift2JavaGenerator {
     ) throws -> NativeResult {
       switch type {
       case .nominal(let nominal):
+        if let knownType = nominal.asKnownType {
+          switch knownType {
+          case .optional(let wrapped):
+            return try translateClosureOptionalResult(wrapped)
+
+          default:
+            break
+          }
+        }
+
+        let nominalTypeName = nominal.nominalTypeDecl.qualifiedName
+
         if let knownType = nominal.nominalTypeDecl.knownTypeKind {
 
           if knownType == .void {
@@ -681,8 +697,26 @@ extension JNISwift2JavaGenerator {
           )
         }
 
-        // Custom types are not supported yet.
-        throw JavaTranslationError.unsupportedSwiftType(type)
+        if nominal.isSwiftJavaWrapper {
+          throw JavaTranslationError.unsupportedSwiftType(type)
+        }
+
+        guard nominal.genericArguments.isEmpty else {
+          throw JavaTranslationError.unsupportedSwiftType(type)
+        }
+
+        let typeJavaPackage = moduleJavaPackages[nominal.nominalTypeDecl.moduleName] ?? javaPackage
+        let javaType = JavaType.class(package: typeJavaPackage, name: nominalTypeName)
+        return NativeResult(
+          javaType: javaType,
+          conversion: .pointee(
+            .extractSwiftValue(
+              .javaObjectMemoryAddress(.placeholder, name: "closureResult"),
+              swiftType: type
+            )
+          ),
+          outParameters: []
+        )
 
       case .tuple([]):
         return NativeResult(
@@ -696,12 +730,49 @@ extension JNISwift2JavaGenerator {
       }
     }
 
+    func translateClosureOptionalResult(
+      _ wrappedType: SwiftType
+    ) throws -> NativeResult {
+      switch wrappedType {
+      case .nominal(let nominal):
+        if nominal.nominalTypeDecl.knownTypeKind != nil {
+          throw JavaTranslationError.unsupportedSwiftType(wrappedType)
+        }
+
+        if nominal.isSwiftJavaWrapper {
+          throw JavaTranslationError.unsupportedSwiftType(wrappedType)
+        }
+
+        guard nominal.genericArguments.isEmpty else {
+          throw JavaTranslationError.unsupportedSwiftType(wrappedType)
+        }
+
+        let nominalTypeName = nominal.nominalTypeDecl.qualifiedName
+        let typeJavaPackage = moduleJavaPackages[nominal.nominalTypeDecl.moduleName] ?? javaPackage
+        let wrappedJavaType = JavaType.class(package: typeJavaPackage, name: nominalTypeName)
+        return NativeResult(
+          javaType: .optional(wrappedJavaType),
+          conversion: .javaOptionalObjectToSwiftValue(
+            .placeholder,
+            name: "closureResult",
+            swiftType: wrappedType
+          ),
+          outParameters: []
+        )
+
+      case .function, .metatype, .tuple, .existential, .opaque, .genericParameter, .composite:
+        throw JavaTranslationError.unsupportedSwiftType(wrappedType)
+      }
+    }
+
     func translateClosureParameter(
       _ type: SwiftType,
       parameterName: String
     ) throws -> NativeParameter {
       switch type {
       case .nominal(let nominal):
+        let nominalTypeName = nominal.nominalTypeDecl.qualifiedName
+
         if let knownType = nominal.nominalTypeDecl.knownTypeKind {
           guard let javaType = JNIJavaTypeTranslator.translate(knownType: knownType, config: self.config),
             javaType.implementsJavaValue
@@ -720,8 +791,31 @@ extension JNISwift2JavaGenerator {
           )
         }
 
-        // Custom types are not supported yet.
-        throw JavaTranslationError.unsupportedSwiftType(type)
+        if nominal.isSwiftJavaWrapper {
+          throw JavaTranslationError.unsupportedSwiftType(type)
+        }
+
+        guard nominal.genericArguments.isEmpty else {
+          throw JavaTranslationError.unsupportedSwiftType(type)
+        }
+
+        let typeJavaPackage = moduleJavaPackages[nominal.nominalTypeDecl.moduleName] ?? javaPackage
+        let javaType = JavaType.class(package: typeJavaPackage, name: nominalTypeName)
+        return NativeParameter(
+          parameters: [
+            JavaParameter(name: parameterName, type: javaType)
+          ],
+          conversion: .getJObjectValue(
+            .wrapSwiftValueForJavaObject(
+              .placeholder,
+              name: parameterName,
+              swiftType: type,
+              javaType: javaType
+            )
+          ),
+          indirectConversion: nil,
+          conversionCheck: nil
+        )
 
       case .function, .metatype, .tuple, .existential, .opaque, .genericParameter, .composite:
         throw JavaTranslationError.unsupportedSwiftType(type)
@@ -1143,6 +1237,9 @@ extension JNISwift2JavaGenerator {
     /// `value.getJValue(in:)`
     indirect case getJValue(NativeSwiftConversionStep)
 
+    /// `jvalue(l: object)`
+    indirect case getJObjectValue(NativeSwiftConversionStep)
+
     /// `SwiftType(from: value, in: environment)`
     indirect case initFromJNI(NativeSwiftConversionStep, swiftType: SwiftType)
 
@@ -1172,16 +1269,31 @@ extension JNISwift2JavaGenerator {
     /// Allocate memory for a Swift value and outputs the pointer
     indirect case allocateSwiftValue(NativeSwiftConversionStep, name: String, swiftType: SwiftType)
 
+    /// Allocate a Swift value and wrap it in the generated Java JExtract class.
+    indirect case wrapSwiftValueForJavaObject(
+      NativeSwiftConversionStep,
+      name: String,
+      swiftType: SwiftType,
+      javaType: JavaType
+    )
+
+    /// Extract `$memoryAddress()` from a generated Java JExtract object.
+    indirect case javaObjectMemoryAddress(NativeSwiftConversionStep, name: String)
+
+    /// Convert a `java.util.Optional<JExtractType>` object into a Swift optional value.
+    indirect case javaOptionalObjectToSwiftValue(NativeSwiftConversionStep, name: String, swiftType: SwiftType)
+
     /// The thing to which the pointer typed, which is the `pointee` property
     /// of the `Unsafe(Mutable)Pointer` types in Swift.
     indirect case pointee(NativeSwiftConversionStep)
 
     indirect case closureLowering(parameters: [NativeParameter], result: NativeResult)
 
-    /// Escaping closure lowering using the protocol infrastructure.
-    /// This uses UpcallConversionStep for full support of optionals, arrays, custom types, etc.
+    /// Escaping closure lowering keeps the Java lambda alive as a global ref and
+    /// resolves the JNI environment at the eventual Swift closure call site.
     indirect case escapingClosureLowering(
-      syntheticFunction: SyntheticClosureFunction,
+      parameters: [NativeParameter],
+      result: NativeResult,
       closureName: String
     )
 
@@ -1283,7 +1395,9 @@ extension JNISwift2JavaGenerator {
       case .asyncTaskCapture(let inner, let name):
         return [name] + inner.asyncTaskCaptureNames
 
-      case .pointee(let inner), .optionalChain(let inner):
+      case .pointee(let inner), .optionalChain(let inner), .getJObjectValue(let inner),
+        .wrapSwiftValueForJavaObject(let inner, _, _, _), .javaObjectMemoryAddress(let inner, _),
+        .javaOptionalObjectToSwiftValue(let inner, _, _):
         return inner.asyncTaskCaptureNames
 
       case .tupleConstruct(let elements):
@@ -1319,6 +1433,10 @@ extension JNISwift2JavaGenerator {
       case .getJValue(let inner):
         let inner = inner.render(&printer, placeholder)
         return "\(inner).getJValue(in: environment)"
+
+      case .getJObjectValue(let inner):
+        let inner = inner.render(&printer, placeholder)
+        return "jvalue(l: \(inner))"
 
       case .initFromJNI(let inner, let swiftType):
         let inner = inner.render(&printer, placeholder)
@@ -1454,6 +1572,91 @@ extension JNISwift2JavaGenerator {
         )
         return bitsName
 
+      case .wrapSwiftValueForJavaObject(let inner, let name, let swiftType, let javaType):
+        let inner = inner.render(&printer, placeholder)
+        guard case .class = javaType else {
+          fatalError("\(javaType) is not a class.")
+        }
+        let pointerName = "\(name)Pointer$"
+        let bitsName = "\(name)Bits$"
+        let classHolderName = "\(name)ClassHolder$"
+        let methodName = "\(name)WrapMemoryAddressUnsafe$"
+        let objectName = "\(name)Object$"
+        let jniClassName = String(javaType.jniTypeSignature.dropFirst().dropLast())
+        let wrapSignature = "(J)\(javaType.jniTypeSignature)"
+        printer.print(
+          """
+          let \(pointerName) = UnsafeMutablePointer<\(swiftType)>.allocate(capacity: 1)
+          \(pointerName).initialize(to: \(inner))
+          let \(bitsName) = Int64(Int(bitPattern: \(pointerName)))
+          let \(classHolderName) = _swiftJavaLoadJExtractClass("\(jniClassName)", environment: environment)
+          let \(methodName) = environment.interface.GetStaticMethodID(environment, \(classHolderName).object!, "wrapMemoryAddressUnsafe", "\(wrapSignature)")!
+          let \(objectName) = environment.interface.CallStaticObjectMethodA(environment, \(classHolderName).object!, \(methodName), [jvalue(j: \(bitsName).getJNIValue(in: environment))])
+          """
+        )
+        return objectName
+
+      case .javaObjectMemoryAddress(let inner, let name):
+        let inner = inner.render(&printer, placeholder)
+        let objectName = "\(name)Object$"
+        let memoryAddressName = "\(name)MemoryAddress$"
+        printer.print(
+          """
+          let \(objectName) = \(inner)
+          guard let \(objectName) else {
+            fatalError("Upcall returned nil for \(name)")
+          }
+          let \(memoryAddressName) = environment.interface.CallLongMethodA(environment, \(objectName), _JNIMethodIDCache.JNISwiftInstance.memoryAddress, [])
+          """
+        )
+        return memoryAddressName
+
+      case .javaOptionalObjectToSwiftValue(let inner, let name, let swiftType):
+        let inner = inner.render(&printer, placeholder)
+        let optionalName = "\(name)Optional$"
+        let resultName = "\(name)Value$"
+        let optionalClassName = "\(name)OptionalClass$"
+        let isPresentMethodName = "\(name)OptionalIsPresent$"
+        let getMethodName = "\(name)OptionalGet$"
+        let isPresentName = "\(name)OptionalIsPresentValue$"
+        let objectName = "\(name)Object$"
+        let memoryAddressName = "\(name)MemoryAddress$"
+        let pointerName = "\(name)Pointer$"
+        printer.print(
+          """
+          let \(optionalName) = \(inner)
+          let \(resultName): \(swiftType)?
+          if let \(optionalName) {
+            let \(optionalClassName) = environment.interface.GetObjectClass(environment, \(optionalName))
+            let \(isPresentMethodName) = environment.interface.GetMethodID(environment, \(optionalClassName), "isPresent", "()Z")!
+            let \(isPresentName) = Bool(fromJNI: environment.interface.CallBooleanMethodA(environment, \(optionalName), \(isPresentMethodName), []), in: environment)
+            if \(isPresentName) {
+              let \(getMethodName) = environment.interface.GetMethodID(environment, \(optionalClassName), "get", "()Ljava/lang/Object;")!
+              let \(objectName) = environment.interface.CallObjectMethodA(environment, \(optionalName), \(getMethodName), [])
+              guard let \(objectName) else {
+                fatalError("Upcall returned a present Optional with nil value for \(name)")
+              }
+              let \(memoryAddressName) = environment.interface.CallLongMethodA(environment, \(objectName), _JNIMethodIDCache.JNISwiftInstance.memoryAddress, [])
+              assert(\(memoryAddressName) != 0, "\(memoryAddressName) memory address was null")
+              let \(memoryAddressName)Bits$ = Int(Int64(fromJNI: \(memoryAddressName), in: environment))
+              let \(pointerName) = UnsafeMutablePointer<\(swiftType)>(bitPattern: \(memoryAddressName)Bits$)
+              guard let \(pointerName) else {
+                fatalError("\(memoryAddressName) memory address was null in call to \\(#function)!")
+              }
+              \(resultName) = \(pointerName).pointee
+              environment.interface.DeleteLocalRef(environment, \(objectName))
+            } else {
+              \(resultName) = nil
+            }
+            environment.interface.DeleteLocalRef(environment, \(optionalClassName))
+            environment.interface.DeleteLocalRef(environment, \(optionalName))
+          } else {
+            \(resultName) = nil
+          }
+          """
+        )
+        return resultName
+
       case .pointee(let inner):
         let inner = inner.render(&printer, placeholder)
         return "\(inner).pointee"
@@ -1507,39 +1710,34 @@ extension JNISwift2JavaGenerator {
 
         return printer.finalize()
 
-      case .escapingClosureLowering(let syntheticFunction, let closureName):
+      case .escapingClosureLowering(let parameters, let nativeResult, let closureName):
         var printer = CodePrinter()
 
-        let fn = syntheticFunction.functionType
-        let parameterNames = fn.parameters.enumerated().map { idx, param in
-          param.parameterName ?? "_\(idx)"
-        }
-        let closureParameters = parameterNames.joined(separator: ", ")
-        let isVoid = fn.resultType == .tuple([])
+        let methodSignature = MethodSignature(
+          resultType: nativeResult.javaType,
+          parameterTypes: parameters.flatMap {
+            $0.parameters.map { parameter in
+              guard case .concrete(let type) = parameter.type else {
+                fatalError("Closures do not support Java generics")
+              }
+              return type
+            }
+          }
+        )
 
-        // Build upcall arguments using UpcallConversionStep conversions
-        var upcallArguments: [String] = []
-        for (idx, conversion) in syntheticFunction.parameterConversions.enumerated() {
-          var argPrinter = CodePrinter()
-          let paramName = parameterNames[idx]
-          let converted = conversion.render(&argPrinter, paramName)
-          upcallArguments.append(converted)
-        }
-
-        // Build result conversion
-        // Note: The Java interface is synchronous even for async closures.
-        // The async nature is on the Swift side, inferred from the expected type.
-        var resultPrinter = CodePrinter()
-        let upcallExpr = "javaInterface$.apply(\(upcallArguments.joined(separator: ", ")))"
-        let resultConverted = syntheticFunction.resultConversion.render(&resultPrinter, upcallExpr)
-        let resultPrefix = resultPrinter.finalize()
+        let names = parameters.flatMap { $0.parameters.map(\.name) }
 
         // Note: async is part of the closure TYPE, not the closure literal syntax.
         // For closures without parameters, we can omit "in" entirely.
         let closureHeader =
-          fn.parameters.isEmpty
+          parameters.isEmpty
           ? "{"
-          : "{ \(closureParameters) in"
+          : "{ \(names.joined(separator: ", ")) in"
+
+        var argumentPrinter = CodePrinter()
+        let arguments = parameters.map {
+          $0.conversion.render(&argumentPrinter, $0.parameters.first!.name)
+        }
 
         printer.print(
           """
@@ -1551,12 +1749,25 @@ extension JNISwift2JavaGenerator {
             let closureContext_\(closureName)$ = JavaObjectHolder(object: \(placeholder), environment: environment)
             
             return \(closureHeader)
-              guard let env$ = try? JavaVirtualMachine.shared().environment() else {
+              guard let environment = try? JavaVirtualMachine.shared().environment() else {
                 fatalError(\"Failed to get JNI environment for escaping closure call\")
               }
 
-              let javaInterface$ = \(syntheticFunction.wrapJavaInterfaceName)(javaThis: closureContext_\(closureName)$.object!, environment: env$)
-              \(resultPrefix)\(isVoid ? resultConverted : "return \(resultConverted)")
+              \(argumentPrinter.finalize())
+              let closureObject$ = closureContext_\(closureName)$.object!
+              let class$ = environment.interface.GetObjectClass(environment, closureObject$)
+              let methodID$ = environment.interface.GetMethodID(environment, class$, "apply", "\(methodSignature.mangledName)")!
+              environment.interface.DeleteLocalRef(environment, class$)
+              let arguments$: [jvalue] = [\(arguments.joined(separator: ", "))]
+          """
+        )
+
+        let upcall =
+          "environment.interface.\(nativeResult.javaType.jniCallMethodAName)(environment, closureObject$, methodID$, arguments$)"
+        let result = nativeResult.conversion.render(&printer, upcall)
+        printer.print(
+          """
+              \(nativeResult.javaType.isVoid ? result : "return \(result)")
             }
           }()
           """
