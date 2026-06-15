@@ -71,6 +71,7 @@ struct JNIStructTests {
         private MyStruct(long selfPointer, SwiftArena swiftArena) {
           SwiftObjects.requireNonZero(selfPointer, "selfPointer");
           this.selfPointer = selfPointer;
+          this.$cleanup = $createCleanup();
 
           // Only register once we have fully initialized the object since this will need the object pointer.
           swiftArena.register(this);
@@ -81,34 +82,6 @@ struct JNIStructTests {
           return new MyStruct(selfPointer, swiftArena);
         }
         """,
-      ]
-    )
-    try assertOutput(
-      input: source,
-      .jni,
-      .java,
-      expectedChunks: [
-        """
-        @Override
-        public Runnable $createDestroyFunction() {
-          long self$ = this.$memoryAddress();
-          long selfType$ = this.$typeMetadataAddress();
-          if (CallTraces.TRACE_DOWNCALLS) {
-            CallTraces.traceDowncall("MyStruct.$createDestroyFunction",
-                "this", this,
-                "self", self$);
-          }
-          return new Runnable() {
-            @Override
-            public void run() {
-              if (CallTraces.TRACE_DOWNCALLS) {
-                CallTraces.traceDowncall("MyStruct.$destroy", "self", self$);
-              }
-              SwiftObjects.destroy(self$, selfType$);
-            }
-          };
-        }
-        """
       ]
     )
   }

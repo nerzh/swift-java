@@ -46,7 +46,6 @@ struct JNIEnumTests {
         import org.swift.swiftkit.core.util.*;
         import org.swift.swiftkit.core.collections.*;
         import java.util.*;
-        import java.util.concurrent.atomic.AtomicBoolean;
         import org.swift.swiftkit.core.annotations.*;
         """,
         """
@@ -65,6 +64,7 @@ struct JNIEnumTests {
         private MyEnum(long selfPointer, SwiftArena swiftArena) {
           SwiftObjects.requireNonZero(selfPointer, "selfPointer");
           this.selfPointer = selfPointer;
+          this.$cleanup = $createCleanup();
 
           // Only register once we have fully initialized the object since this will need the object pointer.
           swiftArena.register(this);
@@ -81,27 +81,6 @@ struct JNIEnumTests {
         """
         public static MyEnum wrapMemoryAddressUnsafe(long selfPointer, SwiftArena swiftArena) {
           return new MyEnum(selfPointer, swiftArena);
-        }
-        """,
-        """
-        @Override
-        public Runnable $createDestroyFunction() {
-          long self$ = this.$memoryAddress();
-          long selfType$ = this.$typeMetadataAddress();
-          if (CallTraces.TRACE_DOWNCALLS) {
-            CallTraces.traceDowncall("MyEnum.$createDestroyFunction",
-                "this", this,
-                "self", self$);
-          }
-          return new Runnable() {
-            @Override
-            public void run() {
-              if (CallTraces.TRACE_DOWNCALLS) {
-                CallTraces.traceDowncall("MyEnum.$destroy", "self", self$);
-              }
-              SwiftObjects.destroy(self$, selfType$);
-            }
-          };
         }
         """,
       ]
@@ -349,9 +328,6 @@ struct JNIEnumTests {
       detectChunkByInitialLines: 1,
       expectedChunks: [],
       notExpectedChunks: [
-        """
-        enum _JNI_MyEnum
-        """,
         """
         public func Java_com_example_swift_MyEnum__00024getAsFirst__J("
         """,

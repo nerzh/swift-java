@@ -24,6 +24,20 @@ let package = Package(
       targets: ["SwiftJava", "SwiftJavaRuntimeSupport"]
     ),
 
+    // EXPERIMENTAL
+    //
+    // Auto-linkage variant of SwiftJava.
+    // Same targets as the .dynamic SwiftJava product, but without an explicit `type:` so SwiftPM picks
+    // linkage based on the consumer:
+    //   - A .dynamic library consumer absorbs these objects into its own
+    //     dylib, yielding a single .so / .dylib instead of one per package
+    //   - A .static library consumer or executable links them statically
+    // Use this when static linking swift-java runtime along with swift stdlib and your own code into a single file.
+    .library(
+      name: "SwiftJavaStatic",
+      targets: ["SwiftJava", "SwiftJavaRuntimeSupport"]
+    ),
+
     .library(
       name: "SwiftJavaConfigurationShared",
       targets: ["SwiftJavaConfigurationShared"]
@@ -59,11 +73,6 @@ let package = Package(
       targets: ["JavaLangReflect"]
     ),
 
-    .executable(
-      name: "swift-java",
-      targets: ["swift-java"]
-    ),
-
     .library(
       name: "SwiftJavaDocumentation",
       targets: ["SwiftJavaDocumentation"]
@@ -88,6 +97,14 @@ let package = Package(
     .library(
       name: "SwiftRuntimeFunctions",
       type: .dynamic,
+      targets: ["SwiftRuntimeFunctions"]
+    ),
+
+    // EXPERIMENTAL
+    //
+    // Auto-linkage variant of SwiftRuntimeFunctions; see SwiftJavaStatic for details.
+    .library(
+      name: "SwiftRuntimeFunctionsStatic",
       targets: ["SwiftRuntimeFunctions"]
     ),
 
@@ -119,11 +136,11 @@ let package = Package(
   dependencies: [
     swiftJavaJNICoreDep,
     .package(url: "https://github.com/swiftlang/swift-syntax", from: "603.0.0"),
-    .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
+    .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
     .package(url: "https://github.com/apple/swift-system", from: "1.4.0"),
     .package(url: "https://github.com/apple/swift-log", from: "1.2.0"),
     .package(url: "https://github.com/apple/swift-collections", from: "1.3.0"), // primarily for ordered collections
-    .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "0.4.0", traits: ["SubprocessFoundation"]),
+    .package(url: "https://github.com/swiftlang/swift-subprocess.git", "0.4.0"..<"0.5.0", traits: ["SubprocessFoundation"]),
 
     // Benchmarking
     .package(url: "https://github.com/ordo-one/package-benchmark", .upToNextMajor(from: "1.4.0")),

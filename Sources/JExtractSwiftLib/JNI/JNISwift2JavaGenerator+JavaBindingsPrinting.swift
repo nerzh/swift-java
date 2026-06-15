@@ -27,7 +27,6 @@ extension JNISwift2JavaGenerator {
     "org.swift.swiftkit.core.util.*",
     "org.swift.swiftkit.core.collections.*",
     "java.util.*",
-    "java.util.concurrent.atomic.AtomicBoolean",
 
     // NonNull, Unsigned and friends
     "org.swift.swiftkit.core.annotations.*",
@@ -172,12 +171,12 @@ extension JNISwift2JavaGenerator {
   }
 
   private func printProtocol(_ printer: inout CodePrinter, _ decl: ImportedNominalType) {
-    var extends = [String]()
+    var extends = self.inheritedProtocols(of: decl).map(\.effectiveJavaSimpleName)
 
     // If we cannot generate Swift wrappers
     // that allows the user to implement the wrapped interface in Java
     // then we require only JExtracted types can conform to this.
-    if !self.interfaceProtocolWrappers.keys.contains(decl) {
+    if !self.interfaceProtocolWrappers.keys.contains(decl) && !extends.contains("JNISwiftInstance") {
       extends.append("JNISwiftInstance")
     }
     let extendsString = extends.isEmpty ? "" : " extends \(extends.joined(separator: ", "))"
@@ -282,6 +281,7 @@ extension JNISwift2JavaGenerator {
         }
         printer.print(
           """
+          this.$cleanup = $createCleanup();
 
           // Only register once we have fully initialized the object since this will need the object pointer.
           swiftArena.register(this);
@@ -317,16 +317,16 @@ extension JNISwift2JavaGenerator {
         /** Pointer to the "self". */
         private final long selfPointer;
 
-        /** Used to track additional state of the underlying object, e.g. if it was explicitly destroyed. */
-        private final AtomicBoolean $state$destroyed = new AtomicBoolean(false);
+        /** Tracks whether this instance has been destroyed; doubles as the destroyed-state holder. */
+        private final SwiftInstanceCleanup $cleanup;
 
         public long $memoryAddress() {
           return this.selfPointer;
         }
 
         @Override
-        public AtomicBoolean $statusDestroyedFlag() {
-          return $state$destroyed;
+        public SwiftInstanceCleanup $cleanup() {
+          return $cleanup;
         }
         """
       )
@@ -349,11 +349,19 @@ extension JNISwift2JavaGenerator {
       }
 
       for method in decl.methods {
+        if isEffectivelyGeneric && method.isStatic {
+          self.logger.debug("Skipping static method '\(method.name)' on unspecialized generic type '\(decl.effectiveJavaName)'")
+          continue
+        }
         printFunctionDowncallMethods(&printer, method)
         printer.println()
       }
 
       for variable in decl.variables {
+        if isEffectivelyGeneric && variable.isStatic {
+          self.logger.debug("Skipping static property '\(variable.name)' on unspecialized generic type '\(decl.effectiveJavaName)'")
+          continue
+        }
         printFunctionDowncallMethods(&printer, variable)
         printer.println()
       }
@@ -365,6 +373,17 @@ extension JNISwift2JavaGenerator {
 
       printer.print(
         """
+        public boolean equals(Object obj) {
+          if (obj instanceof JNISwiftInstance rhs) {
+            return SwiftObjects.equals(this.$memoryAddress(), this.$typeMetadataAddress(), rhs.$memoryAddress(), rhs.$typeMetadataAddress());
+          }
+          return false;
+        }
+
+        public int hashCode() {
+          return SwiftObjects.hashCode(this.$memoryAddress(), this.$typeMetadataAddress());
+        }
+
         public java.lang.String toString() {
           return SwiftObjects.toString(this.$memoryAddress(), this.$typeMetadataAddress());
         }
@@ -375,8 +394,6 @@ extension JNISwift2JavaGenerator {
         """
       )
       printer.println()
-
-      printDestroyFunction(&printer, decl)
     }
   }
 
@@ -488,7 +505,14 @@ extension JNISwift2JavaGenerator {
       return
     }
 
-    printer.printBraceBlock("public sealed interface Case") { printer in
+    let caseGenericClause =
+      if decl.genericParameterNames.isEmpty {
+        ""
+      } else {
+        "<\(decl.genericParameterNames.joined(separator: ", "))>"
+      }
+
+    printer.printBraceBlock("public sealed interface Case\(caseGenericClause)") { printer in
       for enumCase in decl.cases {
         guard let translatedCase = self.translatedEnumCase(for: enumCase) else {
           continue
@@ -499,7 +523,7 @@ extension JNISwift2JavaGenerator {
         }
 
         // Print record
-        printer.print("record \(translatedCase.name)(\(members.joined(separator: ", "))) implements Case {}")
+        printer.print("record \(translatedCase.name)\(caseGenericClause)(\(members.joined(separator: ", "))) implements Case\(caseGenericClause) {}")
       }
     }
     printer.println()
@@ -508,20 +532,24 @@ extension JNISwift2JavaGenerator {
       self.translatedEnumCase(for: $0)
     }.contains(where: \.requiresSwiftArena)
 
-    printer.printBraceBlock("public Case getCase(\(requiresSwiftArena ? "SwiftArena swiftArena" : ""))") { printer in
+    printer.printBraceBlock("public Case\(caseGenericClause) getCase(\(requiresSwiftArena ? "SwiftArena swiftArena" : ""))") { printer in
       printer.printBraceBlock("return switch (this.getDiscriminator())", .semicolonNewLine) { printer in
         for enumCase in decl.cases {
-          guard let translatedCase = self.translatedEnumCase(for: enumCase) else {
-            continue
-          }
-          if enumCase.parameters.isEmpty {
-            printer.print(
-              "case \(enumCase.name.uppercased()) -> new Case.\(translatedCase.name)();"
-            )
+          if let translatedCase = self.translatedEnumCase(for: enumCase) {
+            if enumCase.parameters.isEmpty {
+              printer.print(
+                "case \(enumCase.name.uppercased()) -> new Case.\(translatedCase.name)\(caseGenericClause)();"
+              )
+            } else {
+              let arenaArgument = translatedCase.requiresSwiftArena ? "swiftArena" : ""
+              printer.print(
+                "case \(enumCase.name.uppercased()) -> this.getAs\(translatedCase.name)(\(arenaArgument)).orElseThrow();"
+              )
+            }
           } else {
-            let arenaArgument = translatedCase.requiresSwiftArena ? "swiftArena" : ""
+            logger.warning("\(decl.effectiveJavaName).\(enumCase.name) contains unsupported values so its getCase() method call throws an error.")
             printer.print(
-              "case \(enumCase.name.uppercased()) -> this.getAs\(translatedCase.name)(\(arenaArgument)).orElseThrow();"
+              "case \(enumCase.name.uppercased()) -> throw new UnsupportedOperationException(\"\(decl.effectiveJavaName).\(enumCase.name) contains unsupported values.\");"
             )
           }
         }
@@ -542,12 +570,16 @@ extension JNISwift2JavaGenerator {
   }
 
   private func printEnumCases(_ printer: inout CodePrinter, _ decl: ImportedNominalType) {
+    let caseTypeParameters: [JavaType] = decl.genericParameterNames.map {
+      .class(package: nil, name: $0)
+    }
+
     for enumCase in decl.cases {
       guard let translatedCase = self.translatedEnumCase(for: enumCase) else {
         continue
       }
 
-      let caseType = JavaType.class(package: nil, name: "Case.\(translatedCase.name)")
+      let caseType = JavaType.class(package: nil, name: "Case.\(translatedCase.name)", typeParameters: caseTypeParameters)
       let resultType = JavaType.optional(caseType)
       if let getAsCaseFunctionDecl = translatedCase.getAsCaseFunction,
         var getAsCaseFunction = self.translatedDecl(for: getAsCaseFunctionDecl)
@@ -581,7 +613,7 @@ extension JNISwift2JavaGenerator {
             if (getDiscriminator() != Discriminator.\(enumCase.name.uppercased())) {
               return java.util.Optional.empty();
             }
-            return java.util.Optional.of(new Case.\(translatedCase.name)());
+            return java.util.Optional.of(new Case.\(translatedCase.name)\(caseTypeParameters.isEmpty ? "" : "<>")());
           }
           """
         )
@@ -861,58 +893,6 @@ extension JNISwift2JavaGenerator {
         // INFO: We are omitting `CallTraces.traceDowncall` here.
         // It internally calls `toString`, which in turn calls `$typeMetadataAddress`, creating an infinite loop.
         printer.print("return \(type.effectiveJavaSimpleName).$typeMetadataAddressDowncall();")
-      }
-    }
-  }
-
-  /// Prints the destroy function for a `JNISwiftInstance`
-  private func printDestroyFunction(_ printer: inout CodePrinter, _ type: ImportedNominalType) {
-    let funcName = "$createDestroyFunction"
-    let isEffectivelyGeneric = type.swiftNominal.isGeneric && !type.isSpecialization
-    let typeName = type.effectiveJavaSimpleName
-    printer.print("@Override")
-    printer.printBraceBlock("public Runnable \(funcName)()") { printer in
-      printer.print("long self$ = this.$memoryAddress();")
-      printer.print("long selfType$ = this.$typeMetadataAddress();")
-      if isEffectivelyGeneric {
-        printer.print(
-          """
-          if (CallTraces.TRACE_DOWNCALLS) {
-            CallTraces.traceDowncall("\(typeName).\(funcName)",
-                "this", this,
-                "self", self$,
-                "selfType", selfType$);
-          }
-          return new Runnable() {
-            @Override
-            public void run() {
-              if (CallTraces.TRACE_DOWNCALLS) {
-                CallTraces.traceDowncall("\(typeName).$destroy", "self", self$, "selfType", selfType$);
-              }
-              SwiftObjects.destroy(self$, selfType$);
-            }
-          };
-          """
-        )
-      } else {
-        printer.print(
-          """
-          if (CallTraces.TRACE_DOWNCALLS) {
-            CallTraces.traceDowncall("\(typeName).\(funcName)",
-                "this", this,
-                "self", self$);
-          }
-          return new Runnable() {
-            @Override
-            public void run() {
-              if (CallTraces.TRACE_DOWNCALLS) {
-                CallTraces.traceDowncall("\(typeName).$destroy", "self", self$);
-              }
-              SwiftObjects.destroy(self$, selfType$);
-            }
-          };
-          """
-        )
       }
     }
   }

@@ -121,6 +121,10 @@ package class SwiftNominalTypeDeclaration: SwiftTypeDeclaration {
     self.syntax.inheritanceClause?.inheritedTypes
   }
 
+  var genericWhereClause: GenericWhereClauseSyntax? {
+    self.syntax.asProtocol(WithGenericParametersSyntax.self)?.genericWhereClause
+  }
+
   /// Returns true if this type conforms to `Sendable` and therefore is "threadsafe".
   private(set) lazy var isSendable: Bool = {
     // Check if Sendable is in the inheritance list
@@ -200,6 +204,26 @@ package class SwiftGenericParameterDeclaration: SwiftTypeDeclaration {
   ) {
     self.syntax = node
     super.init(sourceFilePath: sourceFilePath, moduleName: moduleName, name: node.name.text)
+  }
+
+  var hasEach: Bool {
+    syntax.specifier?.tokenKind == .keyword(.each)
+  }
+
+  var packReferenceName: String {
+    if hasEach {
+      "each \(name)"
+    } else {
+      name
+    }
+  }
+
+  var packExpansionName: String {
+    if hasEach {
+      "repeat each \(name)"
+    } else {
+      name
+    }
   }
 }
 

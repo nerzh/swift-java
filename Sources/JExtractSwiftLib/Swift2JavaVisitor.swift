@@ -201,7 +201,11 @@ final class Swift2JavaVisitor {
         lookupContext: translator.lookupContext,
       )
     } catch {
-      self.log.debug("Failed to import: '\(node.qualifiedNameForDebug)'; \(error)")
+      self.log.warning(
+        Self.makeMissingTypeMessage(
+          "Failed to import: '\(node.qualifiedNameForDebug)' in module '\(translator.swiftModuleName)'; \(error)"
+        )
+      )
       return
     }
 
@@ -212,11 +216,6 @@ final class Swift2JavaVisitor {
       apiKind: .function,
       functionSignature: signature,
     )
-
-    if typeContext?.swiftNominal.isGeneric == true && typeContext?.isSpecialization != true && imported.isStatic {
-      log.debug("Skip importing static function in generic type: '\(node.qualifiedNameForDebug)'")
-      return
-    }
 
     log.debug("Record imported method \(node.qualifiedNameForDebug)")
     if let typeContext {
@@ -269,7 +268,11 @@ final class Swift2JavaVisitor {
         typeContext.cases.append(importedCase)
       }
     } catch {
-      self.log.debug("Failed to import: \(node.qualifiedNameForDebug); \(error)")
+      self.log.warning(
+        Self.makeMissingTypeMessage(
+          "Failed to import: \(node.qualifiedNameForDebug) in module '\(translator.swiftModuleName)'; \(error)"
+        )
+      )
     }
   }
 
@@ -309,7 +312,11 @@ final class Swift2JavaVisitor {
         )
       }
     } catch {
-      self.log.debug("Failed to import: \(node.qualifiedNameForDebug); \(error)")
+      self.log.warning(
+        Self.makeMissingTypeMessage(
+          "Failed to import: \(node.qualifiedNameForDebug) in module '\(translator.swiftModuleName)'; \(error)"
+        )
+      )
     }
   }
 
@@ -340,7 +347,11 @@ final class Swift2JavaVisitor {
         lookupContext: translator.lookupContext,
       )
     } catch {
-      self.log.debug("Failed to import: \(node.qualifiedNameForDebug); \(error)")
+      self.log.warning(
+        Self.makeMissingTypeMessage(
+          "Failed to import: \(node.qualifiedNameForDebug) in module '\(translator.swiftModuleName)'; \(error)"
+        )
+      )
       return
     }
     let imported = ImportedFunc(
@@ -387,7 +398,11 @@ final class Swift2JavaVisitor {
         )
       }
     } catch {
-      self.log.debug("Failed to import: \(node.qualifiedNameForDebug); \(error)")
+      self.log.warning(
+        Self.makeMissingTypeMessage(
+          "Failed to import: \(node.qualifiedNameForDebug) in module '\(translator.swiftModuleName)'; \(error)"
+        )
+      )
     }
   }
 
@@ -450,11 +465,6 @@ final class Swift2JavaVisitor {
       apiKind: kind,
       functionSignature: signature,
     )
-
-    if typeContext?.swiftNominal.isGeneric == true && typeContext?.isSpecialization != true && imported.isStatic {
-      log.debug("Skip importing static accessor in generic type: '\(node.qualifiedNameForDebug)'")
-      return
-    }
 
     log.debug(
       "Record imported variable accessor \(kind == .getter || kind == .subscriptGetter ? "getter" : "setter"):\(node.qualifiedNameForDebug)"
@@ -694,6 +704,10 @@ final class Swift2JavaVisitor {
       }
     }
     return true
+  }
+
+  static func makeMissingTypeMessage(_ message: String) -> String {
+    "\(message). If the unresolved type lives in another Swift module, declare it as a SwiftPM target dependency with its own swift-java.config (the JExtractSwiftPlugin wires --depends-on automatically), or pass --depends-on <Module>=<config-path> explicitly."
   }
 }
 

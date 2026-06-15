@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-public struct MyID<T> {
+public struct MyID<T: Hashable>: Hashable {
   public var rawValue: T
   public init(_ rawValue: T) {
     self.rawValue = rawValue
@@ -86,6 +86,11 @@ public enum GenericEnum<T> {
 
 public func makeIntGenericEnum() -> GenericEnum<Int> {
   if Bool.random() { return .foo } else { return .bar }
+}
+
+public enum GenericEnumWithValue<T> {
+  case some(T)
+  case none
 }
 
 extension MyID where T: BinaryInteger {

@@ -12,15 +12,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-public struct Box<Element> {
+public struct Box<Element>: Hashable {
   public var count: Int64
 
   public init(count: Int64) {
     self.count = count
   }
+
+  public static func describeElement() -> String {
+    String(describing: Element.self)
+  }
 }
 
-public struct Fish {
+public struct Fish: Hashable {
   public var name: String
 
   public init(name: String) {

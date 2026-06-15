@@ -35,12 +35,13 @@ extension JNISwift2JavaGenerator {
       return // no need to write any empty files, yay
     }
 
-    logger.info(
+    logger.debug(
       "Write empty [\(self.expectedOutputSwiftFileNames.count)] 'expected' files in: \(swiftOutputDirectory)/"
     )
 
+    // FIXME(SwiftPM): We'd like to avoid having to write these blank files
     for expectedFileName in self.expectedOutputSwiftFileNames {
-      logger.info("Write SwiftPM-'expected' empty file: \(expectedFileName.bold)")
+      logger.trace("Write SwiftPM-'expected' empty file: \(expectedFileName.bold)")
 
       var printer = CodePrinter()
       printer.print("// Empty file generated on purpose")
@@ -151,8 +152,10 @@ extension JNISwift2JavaGenerator {
       return
     }
 
+    let allSymbols = generatedCDeclSymbolNames + ["JNI_OnLoad"]
+
     let symbolLines =
-      generatedCDeclSymbolNames
+      allSymbols
       .sorted()
       .map { "  \($0);" }
       .joined(separator: "\n")
@@ -170,7 +173,7 @@ extension JNISwift2JavaGenerator {
       atomically: true,
       encoding: .utf8,
     )
-    logger.info("[swift-java] Generated linker export list (\(generatedCDeclSymbolNames.count) symbols): \(outputPath)")
+    logger.info("[swift-java] Generated linker export list (\(allSymbols.count) symbols): \(outputPath)")
   }
 
   /// Prints the extension needed to make allow upcalls from Swift to Java for protocols
@@ -178,13 +181,23 @@ extension JNISwift2JavaGenerator {
     _ printer: inout CodePrinter,
     _ translatedWrapper: JavaInterfaceSwiftWrapper,
   ) throws {
-    printer.printBraceBlock("protocol \(translatedWrapper.wrapperName): \(translatedWrapper.swiftName)") { printer in
+    let inheritedWrappers = self.inheritedProtocols(of: translatedWrapper.importedType).compactMap { self.interfaceProtocolWrappers[$0] }
+    let inheritedTypes = [translatedWrapper.swiftName] + inheritedWrappers.map(\.wrapperName)
+
+    printer.printBraceBlock("protocol \(translatedWrapper.wrapperName): \(inheritedTypes.joined(separator: ", "))") { printer in
       printer.print(
         "var \(translatedWrapper.javaInterfaceVariableName): \(translatedWrapper.javaInterfaceName) { get }"
       )
     }
     printer.println()
     try printer.printBraceBlock("extension \(translatedWrapper.wrapperName)") { printer in
+      for inherited in inheritedWrappers {
+        printer.printBraceBlock("var \(inherited.javaInterfaceVariableName): \(inherited.javaInterfaceName)") { printer in
+          printer.print("\(translatedWrapper.javaInterfaceVariableName)")
+        }
+        printer.println()
+      }
+
       for function in translatedWrapper.functions {
         try printInterfaceWrapperFunctionImpl(&printer, function, inside: translatedWrapper)
         printer.println()
@@ -341,6 +354,14 @@ extension JNISwift2JavaGenerator {
 
     for variable in type.variables {
       printSwiftFunctionThunk(&printer, variable)
+      printer.println()
+    }
+
+    let isNeverLike = type.swiftNominal.kind == .enum && type.cases.isEmpty // Never types cannot be values, so ignore them
+    if !type.isSpecialization && !isNeverLike {
+      printJNICache(&printer, type)
+      printer.println()
+      printNominalJavaBridge(&printer, type)
       printer.println()
     }
 
@@ -761,6 +782,82 @@ extension JNISwift2JavaGenerator {
     }
   }
 
+  private func printJNICache(_ printer: inout CodePrinter, _ type: ImportedNominalType) {
+    let cacheName = JNICaching.cacheName(for: type)
+    let jniClassName = "\(javaPackagePath)/\(type.effectiveJavaTypeName.jniEscapedName)"
+    let isEffectivelyGeneric = type.swiftNominal.isGeneric && type.effectiveJavaTypeName == type.swiftNominal.qualifiedTypeName
+    let signature =
+      if isEffectivelyGeneric {
+        "(JJLorg/swift/swiftkit/core/SwiftArena;)L\(jniClassName);"
+      } else {
+        "(JLorg/swift/swiftkit/core/SwiftArena;)L\(jniClassName);"
+      }
+
+    printer.printBraceBlock("private enum \(cacheName)") { printer in
+      printer.print(
+        """
+        private static let wrapMemoryAddressUnsafeMethod = _JNIMethodIDCache.Method(
+          name: "wrapMemoryAddressUnsafe",
+          signature: "\(signature)",
+          isStatic: true
+        )
+
+        private static let cache = _JNIMethodIDCache(
+          className: "\(jniClassName)",
+          methods: [wrapMemoryAddressUnsafeMethod]
+        )
+
+        static var javaClass: jclass {
+          cache.javaClass
+        }
+
+        static var wrapMemoryAddressUnsafe: jmethodID {
+          cache[wrapMemoryAddressUnsafeMethod]!
+        }
+        """
+      )
+    }
+  }
+
+  private func printNominalJavaBridge(_ printer: inout CodePrinter, _ type: ImportedNominalType) {
+    let bridgeName = JNICaching.bridgeName(for: type)
+    let cacheName = JNICaching.cacheName(for: type)
+    let isEffectivelyGeneric = type.swiftNominal.isGeneric && !type.isSpecialization
+    let bridgeGenericClause =
+      if type.swiftNominal.genericParameters.isEmpty {
+        ""
+      } else {
+        "<\(type.swiftNominal.genericParameters.map { $0.syntax.trimmedDescription }.joined(separator: " "))>"
+      }
+    let bridgeWhereClause = type.swiftNominal.genericWhereClause?.trimmedDescription
+    let bridgedSwiftType =
+      if type.genericParameterNames.isEmpty {
+        type.effectiveSwiftTypeName
+      } else {
+        "\(type.baseTypeName)<\(type.swiftNominal.genericParameters.map(\.packExpansionName).joined(separator: ", "))>"
+      }
+    let parentProtocol = isEffectivelyGeneric ? "JextractedGenericTypeBridge" : "JextractedTypeBridge"
+
+    let bridgeDeclaration =
+      if let bridgeWhereClause {
+        "struct \(bridgeName)\(bridgeGenericClause): \(parentProtocol) \(bridgeWhereClause)"
+      } else {
+        "struct \(bridgeName)\(bridgeGenericClause): \(parentProtocol)"
+      }
+
+    printer.printBraceBlock(bridgeDeclaration) { printer in
+      printer.print("typealias SwiftType = \(bridgedSwiftType)")
+      printer.println()
+      printer.printBraceBlock("static var javaClass: jclass") { printer in
+        printer.print("\(cacheName).javaClass")
+      }
+      printer.println()
+      printer.printBraceBlock("static var wrapMemoryAddressUnsafe: jmethodID") { printer in
+        printer.print("\(cacheName).wrapMemoryAddressUnsafe")
+      }
+    }
+  }
+
   private func printHeader(_ printer: inout CodePrinter) {
     // `public import` so the thunk file remains valid under
     // `InternalImportsByDefault` (SE-0409)
@@ -955,12 +1052,10 @@ extension JNISwift2JavaGenerator {
     printer.println()
     printer.printBraceBlock("extension \(type.swiftNominal.qualifiedName): \(protocolName)") { printer in
       for variable in type.variables {
-        if variable.isStatic { continue }
         printFunctionDecl(&printer, decl: variable, skipMethodBody: false)
       }
 
       for method in type.methods {
-        if method.isStatic { continue }
         printFunctionDecl(&printer, decl: method, skipMethodBody: false)
       }
     }

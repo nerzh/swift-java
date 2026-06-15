@@ -76,28 +76,6 @@ struct JNIGenericTypeTests {
           return this.selfTypePointer;
         }
         """,
-        """
-        @Override
-        public Runnable $createDestroyFunction() {
-          long self$ = this.$memoryAddress();
-          long selfType$ = this.$typeMetadataAddress();
-          if (CallTraces.TRACE_DOWNCALLS) {
-            CallTraces.traceDowncall("MyID.$createDestroyFunction",
-              "this", this,
-              "self", self$,
-              "selfType", selfType$);
-          }
-          return new Runnable() {
-            @Override
-            public void run() {
-              if (CallTraces.TRACE_DOWNCALLS) {
-                CallTraces.traceDowncall("MyID.$destroy", "self", self$, "selfType", selfType$);
-              }
-              SwiftObjects.destroy(self$, selfType$);
-            }
-          };
-        }
-        """,
       ]
     )
   }
@@ -215,6 +193,72 @@ struct JNIGenericTypeTests {
   }
 
   @Test
+  func generateOpenerForGenericStaticMethod() throws {
+    let input =
+      #"""
+      public struct Box<Element> {
+        public static func describeElement() -> String {
+          "\(Element.self)"
+        }
+      }
+      """#
+
+    try assertOutput(
+      input: input,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 2,
+      expectedChunks: [
+        """
+        protocol _SwiftModule_Box_opener {
+          static func _describeElement(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass) -> jstring?
+        }
+        """,
+        #"""
+        extension Box: _SwiftModule_Box_opener {
+          static func _describeElement(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass) -> jstring? {
+            return Box<Element>.describeElement().getJNILocalRefValue(in: environment)
+          }
+        }
+        """#,
+      ]
+    )
+  }
+
+  @Test
+  func generatesOpenerForVariadicGenericStaticMethod() throws {
+    let input =
+      #"""
+      public struct VariadicBox<each T> {
+        public static func describe() -> String {
+          "\(VariadicBox<repeat each T>.self)"
+        }
+      }
+      """#
+
+    try assertOutput(
+      input: input,
+      .jni,
+      .swift,
+      detectChunkByInitialLines: 2,
+      expectedChunks: [
+        """
+        protocol _SwiftModule_VariadicBox_opener {
+          static func _describe(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass) -> jstring?
+        }
+        """,
+        #"""
+        extension VariadicBox: _SwiftModule_VariadicBox_opener {
+          static func _describe(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass) -> jstring? {
+            return VariadicBox<repeat each T>.describe().getJNILocalRefValue(in: environment)
+          }
+        }
+        """#,
+      ]
+    )
+  }
+
+  @Test
   func genericValueInEnumCase() throws {
     let input =
       #"""
@@ -248,6 +292,45 @@ struct JNIGenericTypeTests {
         #"""
         public func Java_com_example_swift_MyEnum__00024getAsFoo__J_3BLorg_swift_swiftkit_core__1OutSwiftGenericInstance_2(environment: UnsafeMutablePointer<JNIEnv?>!, thisClass: jclass, selfPointer: jlong, result_discriminator$: jbyteArray?, resultWrappedOut: jobject?) {
         """#
+      ]
+    )
+  }
+
+  @Test
+  func genericEnumWithAssociatedValue() throws {
+    let input =
+      #"""
+      public enum MyOptional<Wrapped> {
+        case some(Wrapped)
+        case none
+      }
+      """#
+
+    try assertOutput(
+      input: input,
+      .jni,
+      .java,
+      detectChunkByInitialLines: 2,
+      expectedChunks: [
+        """
+        public enum Discriminator {
+          SOME,
+          NONE
+        }
+        """,
+        """
+        public sealed interface Case<Wrapped> {
+          record None<Wrapped>() implements Case<Wrapped> {}
+        }
+        """,
+        """
+        public Case<Wrapped> getCase() {
+          return switch (this.getDiscriminator()) {
+           case SOME -> throw new UnsupportedOperationException("MyOptional.some contains unsupported values.");
+           case NONE -> new Case.None<Wrapped>();
+          };
+        }
+        """,
       ]
     )
   }
